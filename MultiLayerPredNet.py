@@ -35,7 +35,7 @@ class MultiLayerPredNet:
         for layer in range(self.layer_count):
 
             # Build our custom PredNetModel object
-            print('LAYER: %d\nCH: %d\nHGT: %d\nWID: %d\n' % (layer, new_channels, new_img_height, new_img_height))
+            #print('LAYER: %d\nCH: %d\nHGT: %d\nWID: %d\n' % (layer, new_channels, new_img_height, new_img_height))
             prednet_layer = PredNetModel.PredNetModel(NUM_UNROLLINGS=self.num_unrollings,
                                                       IN_CHANNELS=new_channels,
                                                       CORE_CHANNELS=new_channels,

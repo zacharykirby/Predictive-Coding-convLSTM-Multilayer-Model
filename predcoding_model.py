@@ -8,9 +8,10 @@ Last modified: Wed Dec 15, 2017
 Contributers: A. Maida, N. Elsayed, M. Hosseini, Z. Kirby
 
 This is a convolutional LSTM prototype for predictive coding.
-Input maps are:
+
+Input types are:
     1. Half plane moving to the right.
-    2. Associated local movement map
+    2. A single moving MNIST video
 
 """
 
@@ -24,23 +25,31 @@ print("""\n
    
  by the Biological Artificial Intelligence Lab,
       University of Louisiana at Lafayette 
-         inspired by Lotter et al. (2017)
+        inspired by Lotter et al. (2017)
                    """)
 
+# Custom python imports
 import MultiLayerPredNet as MLP
 import PredNetModel
+
+# Basic system stuff
 import os
 import sys
 import time
+
+# Advanced imports
 import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
 from matplotlib import cm, colors
-import tensorflow as tf
+from collections import defaultdict
 
+# Debug prints for good practice
 print("Python version    : ", sys.version)
 print("TensorFlow version: ", tf.VERSION)
 print("Current directory : ", os.getcwd())
 start_time = time.time()
+
 """
  Logging w/ TensorBoard
  The /tmp directory is periodically cleaned, such as on reboot.
@@ -48,24 +57,25 @@ start_time = time.time()
  this is a practical place to put them if you are the only
  user of the computer.
 """
-LOGDIR = "/tmp/convLSTM_v3/"
-LENGTH_OF_VID = 30
-IM_SZ_HGT = 64  # For later experiments, modify size as necessary
-IM_SZ_WID = 64
-BATCH_SZ = 1
-NUM_UNROLLINGS = 3
-INIT_LEARNING_RATE = 0.001  # initial learning rate
-NUM_TRAINING_STEPS = 250
-VIDEO_CHANNELS = 1
 
-LAYER_WISE = False  # Whether or not we train each layer as independent loss values
-MOVING_MNIST = True
+# Constant variables for training, change as needed
+LOGDIR = "/tmp/convLSTM/" # where to log tensorboard
+LENGTH_OF_VID = 30 # length of video to create
+IM_SZ_HGT = 64  # image height
+IM_SZ_WID = 64 # image width
+BATCH_SZ = 1 # batch size (change later?)
+NUM_UNROLLINGS = 8 # how many steps in time should our LSTM see?
+INIT_LEARNING_RATE = 0.1  # initial learning rate
+NUM_TRAINING_STEPS = 300 # times to run computational graph
+VIDEO_CHANNELS = 1 # only change if using RGB or local movement map
+
+LAYER_COUNT = 4 # how many layers of prednet?
+LAYER_WISE = False  # Whether or not we train each layer's optimizer
+MOVING_MNIST = True # use moving mnist or not (defaults to moving plane)
 
 """
-Create Input Video with 2 Channels:
+Create Input Video with 1 Channels:
   Channel 0: Video of a moving half-plane to the right.
-  Channel 1:. Local movement map (LMM) to match channel 0.
-  Store each video in ndarray with three dimensions.
   Videos are used to load feed dictionary.
 """
 if not MOVING_MNIST:
@@ -81,6 +91,8 @@ if not MOVING_MNIST:
 Load Moving MNIST
     This is a MUCH harder dataset then the simple moving plane.
     We are looking for shape retention as the MNIST objects bounce around.
+    
+    This file was generated elsewhere using a script called moving_mnist.py.
 """
 if MOVING_MNIST:
     with np.load('movingmnistdata.npz') as data:
@@ -90,20 +102,22 @@ if MOVING_MNIST:
     # Take first video sequence
     in_video = a[:LENGTH_OF_VID, :, :]
     in_video = np.expand_dims(in_video, axis=-1)
-    for x in range(LENGTH_OF_VID):
-        plt.imshow(np.squeeze(in_video[x:(x + 1), :, :]), cmap=cm.gray_r, vmin=0.0, vmax=1.0)
-        plt.show()
+    #for x in range(LENGTH_OF_VID):
+    #    plt.imshow(np.squeeze(in_video[x:(x + 1), :, :]), cmap=cm.gray_r, vmin=0.0, vmax=1.0)
+    #    plt.show()
 
+# Generate default prediction, which is a gray square
 default_prediction = np.empty([IM_SZ_HGT, IM_SZ_WID, VIDEO_CHANNELS], dtype=np.float32)
 default_prediction[:, :, :] = 0.5
 plt.imshow(default_prediction[:, :, 0], cmap=cm.gray_r, vmin=0.0, vmax=1.0)
+plt.title('Default Prediction')
 plt.show()
 
 """
  BUILD the GRAPH
      Convolutional LSTM.
      Each node in the LSTM is a stack of two feature maps.
-     Internal convolutions are 5x5 w/ stride of 1.
+     Internal convolutions are 5x5 w/ stride of 1 (usually!).
 """
 # These vars must be equal. 
 # Separate names are used because they have separate purposes.
@@ -115,23 +129,37 @@ core_channels = VIDEO_CHANNELS  # stack height of internal maps
 # We construct multiple prednet layers and add them to a list
 graph = tf.Graph()
 with graph.as_default():
-    MLP = MLP.MultiLayerPredNet(layer_count=4,
+    
+    # Define our multilayer prednet helper object
+    MLP = MLP.MultiLayerPredNet(layer_count=LAYER_COUNT,
                                 img_width=IM_SZ_WID,
                                 img_height=IM_SZ_HGT,
                                 num_unrollings=NUM_UNROLLINGS,
                                 channels=VIDEO_CHANNELS)
+    
+    # Build layers and return a list of them
     prednets = MLP.build_layers_()
-    prednet_0 = prednets[0]
-    prednet_1 = prednets[1]
-    prednet_2 = prednets[2]
-    prednet_3 = prednets[3]
 
     # Upsample weights for conv2d, i think i need these here
-    # hard coded until I finally obtain sanity
-    upsample_0 = tf.Variable(tf.truncated_normal([5, 5, VIDEO_CHANNELS, 32], mean=-0.1, stddev=0.1, seed=42))
-    upsample_1 = tf.Variable(tf.truncated_normal([5, 5, 32, 64], mean=-0.1, stddev=0.1, seed=42))
-    upsample_2 = tf.Variable(tf.truncated_normal([5, 5, 64, 128], mean=-0.1, stddev=0.1, seed=42))
-    upsample_3 = tf.Variable(tf.truncated_normal([5, 5, 128, 256], mean=-0.1, stddev=0.1, seed=42))
+    upsample_W = list()
+    channels = VIDEO_CHANNELS
+    for x in range(LAYER_COUNT + 1):
+        
+        if x == 0:
+            temp_W = tf.Variable(tf.zeros(1)) #who cares what's in here
+        
+        if x == 1:
+            # For our initial upsample, we go to 32 channels (don't ask why)
+            channels = VIDEO_CHANNELS
+            temp_W = tf.Variable(tf.truncated_normal([5, 5, channels, 32]))
+            channels = 32
+            
+        else:
+            # Gets twice as deep each iteration
+            temp_W = tf.Variable(tf.truncated_normal([5, 5, channels, channels * 2]))
+            channels *= 2
+            
+        upsample_W.append(temp_W)
 
 """
 START TRAINING
@@ -148,96 +176,85 @@ with tf.Session(graph=graph) as sess:
     writer = tf.summary.FileWriter(LOGDIR + str(dir_index))
     writer.add_graph(sess.graph)
 
+    # Since we don't know how many layers exist, make a defaultdict of lists
+    losses = defaultdict(list)
     for step in range(NUM_TRAINING_STEPS):
+        
         index = step % (LENGTH_OF_VID - NUM_UNROLLINGS)  # select starting frame of video segment
+        #index = 10 # test if it can learn one single sequence
 
         data_for_this_iteration = in_video[index:(index + NUM_UNROLLINGS), :, :, :]  # video segment is NUM_UNROLLINGS long
-        # FIRST LAYER------------------------------------------------------------------
-        #   We always compute loss on the bottom layer, no need to check
-        feed_dict_0 = {prednet_0.p_holder: data_for_this_iteration}
-
-        _, l_0, new_lstm_output_0, err_out_0 = sess.run([prednet_0.optimizer,
-                                                         prednet_0.loss,
-                                                         prednet_0.lstm_output,
-                                                         prednet_0.err_output],
-                                                        feed_dict=feed_dict_0)
-        # SECOND LAYER-----------------------------------------------------------------
-        new_width = int(IM_SZ_HGT / 2)
-        new_height = int(IM_SZ_WID / 2)
-        new_channels = 32  # why is this like this?
-
-        new_data_0 = tf.nn.conv2d(err_out_0, upsample_0, [1, 1, 1, 1], padding='SAME').eval()
-        new_data_0 = tf.nn.relu(new_data_0).eval()
-        new_data_0 = tf.nn.max_pool(new_data_0, [1, 5, 5, 1], [1, 2, 2, 1], padding='SAME').eval()
-        feed_dict_1 = {prednet_1.p_holder: new_data_0}
-
-        if LAYER_WISE:
-            _, l_1, new_lstm_output_1, err_out_1 = sess.run([prednet_1.optimizer,
-                                                         prednet_1.loss,
-                                                         prednet_1.lstm_output,
-                                                         prednet_1.err_output],
-                                                        feed_dict=feed_dict_1)
-        if not LAYER_WISE:
-            new_lstm_output_1, err_out_1 = sess.run([prednet_1.lstm_output,
-                                                 prednet_1.err_output],
-                                                feed_dict=feed_dict_1)
-        # THIRD LAYER------------------------------------------------------------------
-        new_width = int(new_width / 2)
-        new_height = int(new_height / 2)
-        new_channels = int(new_channels * 2)
-
-        new_data_1 = tf.nn.conv2d(err_out_1, upsample_1, [1, 1, 1, 1], padding='SAME').eval()
-        new_data_1 = tf.nn.relu(new_data_1).eval()
-        new_data_1 = tf.nn.max_pool(new_data_1, [1, 5, 5, 1], [1, 2, 2, 1], padding='SAME').eval()
-        feed_dict_2 = {prednet_2.p_holder: new_data_1}
-
-        if LAYER_WISE:
-            _, l_2, new_lstm_output_2, err_out_2 = sess.run([prednet_2.optimizer,
-                                                         prednet_2.loss,
-                                                         prednet_2.lstm_output,
-                                                         prednet_2.err_output],
-                                                        feed_dict=feed_dict_2)
-        if not LAYER_WISE:
-            new_lstm_output_2, err_out_2 = sess.run([prednet_2.lstm_output,
-                                                 prednet_2.err_output],
-                                                feed_dict=feed_dict_2)
-        # FOURTH LAYER------------------------------------------------------------------
-        new_width = int(new_width / 2)
-        new_height = int(new_height / 2)
-        new_channels = int(new_channels * 2)
-
-        new_data_2 = tf.nn.conv2d(err_out_2, upsample_2, [1, 1, 1, 1], padding='SAME').eval()
-        new_data_2 = tf.nn.relu(new_data_2).eval()
-        new_data_2 = tf.nn.max_pool(new_data_2, [1, 5, 5, 1], [1, 2, 2, 1], padding='SAME').eval()
-        feed_dict_3 = {prednet_3.p_holder: new_data_2}
-        if LAYER_WISE:
-            _, l_3, new_lstm_output_3, err_out_3 = sess.run([prednet_3.optimizer,
-                                                         prednet_3.loss,
-                                                         prednet_3.lstm_output,
-                                                         prednet_3.err_output],
-                                                        feed_dict=feed_dict_3)
-        if not LAYER_WISE:
-            new_lstm_output_3, err_out_3 = sess.run([prednet_3.lstm_output,
-                                                 prednet_3.err_output],
-                                                feed_dict=feed_dict_3)
+        
+        # Modular code is good!
+        for x in range(LAYER_COUNT):
+            if x == 0:
+                # Again, handle layer 0 specially. No upsample
+                fd = {prednets[x].p_holder: data_for_this_iteration}
+                _, loss, lstm_out, err_out = sess.run([prednets[x].optimizer,
+                                                       prednets[x].loss,
+                                                       prednets[x].lstm_output,
+                                                       prednets[x].err_output],
+                                                       feed_dict=fd)
+                losses['layer_'+str(x)].append(loss)
+            
+            elif x == 1:
+                new_width = int(IM_SZ_HGT / 2)
+                new_height = int(IM_SZ_WID / 2)
+                new_channels = 32  # why is this like this?
+                
+                # THe upsample weights are defined in the graph and added to upsample_W list
+                new_data = tf.nn.conv2d(err_out, upsample_W[x], [1, 1, 1, 1], padding='SAME').eval()
+                new_data = tf.nn.relu(new_data).eval()
+                new_data = tf.nn.max_pool(new_data, [1, 5, 5, 1], [1, 2, 2, 1], padding='SAME').eval()
+                fd = {prednets[x].p_holder: new_data}
+                
+                if LAYER_WISE:
+                    _, loss, lstm_out, err_out = sess.run([prednets[x].optimizer,
+                                                       prednets[x].loss,
+                                                       prednets[x].lstm_output,
+                                                       prednets[x].err_output],
+                                                       feed_dict=fd)
+                    losses['layer_'+str(x)].append(loss)
+                    
+                else:
+                    lstm_out, err_out = sess.run([prednets[x].lstm_output,
+                                                  prednets[x].err_output],
+                                                  feed_dict=fd)
+            
+            else:
+                new_width = int(IM_SZ_HGT / 2)
+                new_height = int(IM_SZ_WID / 2)
+                new_channels = int(new_channels * 2)
+                
+                new_data = tf.nn.conv2d(err_out, upsample_W[x], [1, 1, 1, 1], padding='SAME').eval()
+                new_data = tf.nn.relu(new_data).eval()
+                new_data = tf.nn.max_pool(new_data, [1, 5, 5, 1], [1, 2, 2, 1], padding='SAME').eval()
+                fd = {prednets[x].p_holder: new_data}
+                
+                if LAYER_WISE:
+                    _, loss, lstm_out, err_out = sess.run([prednets[x].optimizer,
+                                                       prednets[x].loss,
+                                                       prednets[x].lstm_output,
+                                                       prednets[x].err_output],
+                                                       feed_dict=fd)
+                    losses['layer_'+str(x)].append(loss)
+                else:
+                    lstm_out, err_out = sess.run([prednets[x].lstm_output,
+                                                  prednets[x].err_output],
+                                                  feed_dict=fd)
         # Begin DEBUG outputs
-        prev_l = 0
         if step % 10 == 0:
             print("Step: ", step)
             if not LAYER_WISE:
-                print("> Loss               : ", l_0)
-                print("> NET CHANGE         : ", l_0 - prev_l)
-                prev_l = l_0
+                print("> Loss               : ", np.mean(losses['layer_0']))
             if LAYER_WISE:
                 print('LAYER-WISE LOSS')
-                print("> First Layer        : ", l_0)
-                print("> > Second Layer     : ", l_1)
-                print("> > > Third Layer    : ", l_2)
-                print("> > > > Fourth Layer : ", l_3)
+                for x in range(LAYER_COUNT):
+                    print('> Layer ' + str(x) + ': ', np.mean(losses['layer_' + str(x)]))
             print("------------------------------------")
         if step == (NUM_TRAINING_STEPS - 1):
             print("Output at end of training from 'new_lstm_output' for {} training steps.".format(NUM_TRAINING_STEPS))
-            out = np.squeeze(new_lstm_output_0)
+            out = np.squeeze(lstm_out)
 
             fig, ax = plt.subplots(ncols=NUM_UNROLLINGS, nrows=2)
             inp = np.squeeze(data_for_this_iteration)

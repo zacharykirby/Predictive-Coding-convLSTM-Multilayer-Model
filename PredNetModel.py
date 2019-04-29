@@ -195,23 +195,23 @@ class PredNetModel:
         #        with self.graph.as_default():
 
         if self.PEEPHOLE == False:
-            self.inp = tf.sigmoid(tf.nn.conv2d(err_inp, self.U, [1, 1, 1, 1], padding='SAME')
+            self.inp = tf.tanh(tf.nn.conv2d(err_inp, self.U, [1, 1, 1, 1], padding='SAME')
                                   + tf.nn.conv2d(prev_h, self.W, [1, 1, 1, 1], padding='SAME')
                                   + self.B)
             self.g_gate = tf.tanh(tf.nn.conv2d(err_inp, self.Ug, [1, 1, 1, 1], padding='SAME')
                                   + tf.nn.conv2d(prev_h, self.Wg, [1, 1, 1, 1], padding='SAME')
                                   + self.Bg, name="g_gate")
-            self.f_gate = tf.sigmoid(tf.nn.conv2d(err_inp, self.Uf, [1, 1, 1, 1], padding='SAME')
+            self.f_gate = tf.tanh(tf.nn.conv2d(err_inp, self.Uf, [1, 1, 1, 1], padding='SAME')
                                      + tf.nn.conv2d(prev_h, self.Wf, [1, 1, 1, 1], padding='SAME')
                                      + self.Bf)
-            self.q_gate = tf.sigmoid(tf.nn.conv2d(err_inp, self.Uo, [1, 1, 1, 1], padding='SAME')
+            self.q_gate = tf.tanh(tf.nn.conv2d(err_inp, self.Uo, [1, 1, 1, 1], padding='SAME')
                                      + tf.nn.conv2d(prev_h, self.Wo, [1, 1, 1, 1], padding='SAME')
                                      + self.Bo)
             s = tf.add(tf.multiply(self.f_gate, prev_s), tf.multiply(self.g_gate, self.inp), name="state")
             if not self.lstm_upsample:
-                h = tf.multiply(self.q_gate, tf.nn.tanh(s), name="output")
+                h = tf.multiply(self.q_gate, tf.nn.relu6(s), name="output")
             else:
-                h = tf.multiply(self.q_gate, tf.nn.tanh(s), name="output")
+                h = tf.multiply(self.q_gate, tf.nn.relu6(s), name="output")
                 h = tf.image.resize_images(h, [self.NUM_UNROLLINGS, self.IM_SZ_HGT, self.IM_SZ_WID, self.IN_CHANNELS])
 
         elif self.PEEPHOLE == True:  # with peephole
